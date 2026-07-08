@@ -48,13 +48,15 @@ Body:
   "month": "May",
   "year": 2026,
   "email": true,
-  "to": "philipp@lowcoding.dev"
+  "to": ["philipp@lowcoding.dev", "someone-else@x.com"],
+  "additional_mail": "manager@x.com"
 }
 ```
 - `team`: exact Airtable `Team Name`, or `"all"` for every team with matching data that period (same semantics as the CLI's `--team all`).
 - `month`: number (1-12) or name.
 - `email` (optional, default `false`): if true, emails the generated report(s) as attachments, same as CLI `--email`.
-- `to` (optional): overrides the default recipient (`philipp@lowcoding.dev`).
+- `to` (optional): overrides the default recipient (`philipp@lowcoding.dev`). Accepts either a single string or an array of email addresses — all listed addresses go in the To field of one email.
+- `additional_mail` (optional): one or more email addresses (string or array) CC'd on the same email.
 - `dry_run` (optional): query and summarize without generating/emailing anything.
 
 Example:
@@ -72,11 +74,12 @@ Response (200):
   "is_batch": false,
   "month": "May",
   "year": 2026,
-  "results": [{"team": "...", "matched": 20, "merged": 10, "total_dues": "1366.30", "total_hq": "406.06", "output_path": "/tmp/reports/..."}],
+  "results": [{"team": "...", "matched": 20, "merged": 10, "total_dues": "1366.30", "total_hq": "406.06", "output_path": "/tmp/reports/(PU# 791101) Brooklyn FC (Championship) _ May_2026.xlsx"}],
   "emailed": true,
   "email_error": null
 }
 ```
+Note: `output_path` reflects the new deliverable-format filename — `(PU# <number>) <Team> _ <Month>_<Year>.xlsx`, where `PU#` comes from the Teams table's `CWA PU Number` field (falls back to `(PU# unknown)` if a team has none on file). Since this filename has no timestamp, re-running the same team/month/year overwrites rather than versioning.
 
 Status codes: `400` bad/missing input, `401` missing or wrong `X-API-Key`, `500` server-side config/schema problem, `502` upstream Airtable failure. `200` with `"status": "no_data"` means the request was valid but nothing matched (not an error — mirrors the CLI's exit-2 case).
 

@@ -223,19 +223,31 @@ def fetch_all_records(
     return records
 
 
-def get_all_team_names(cfg: Config) -> list[str]:
-    records = fetch_all_records(cfg, table_id=cfg.teams_table_id, fields=["Name"])
-    names = {
-        str(name).strip()
-        for r in records
-        if (name := r.get("fields", {}).get("Name")) and str(name).strip()
-    }
-    if not names:
+def get_team_metadata(cfg: Config) -> dict[str, dict]:
+    """Fetch Name + CWA PU Number for every team in the Teams table. Keyed by
+    the exact 'Name' field value; used both to resolve --team all's team list
+    and to look up each team's PU# for the output filename."""
+    records = fetch_all_records(cfg, table_id=cfg.teams_table_id, fields=["Name", "CWA PU Number"])
+    metadata = {}
+    for r in records:
+        fields = r.get("fields", {})
+        name = fields.get("Name")
+        if not name or not str(name).strip():
+            continue
+        metadata[str(name).strip()] = {"pu_number": fields.get("CWA PU Number")}
+    if not metadata:
         raise AirtableAPIError(
             f"No team names found in Teams table {cfg.teams_table_id} — check AIRTABLE_TEAMS_TABLE_ID "
             f"and confirm the table has a 'Name' field."
         )
-    return sorted(names)
+    return metadata
+
+
+def lookup_pu_number(team_metadata: dict, team_name: str):
+    if team_name in team_metadata:
+        return team_metadata[team_name]["pu_number"]
+    lower_map = {k.lower(): v["pu_number"] for k, v in team_metadata.items()}
+    return lower_map.get(team_name.strip().lower())
 
 
 DUPLICATE_SUM_FIELDS = ["Dues Paid", "Computed Wage", "Computed PC", "Computed MRF", "Total Due to National HQ"]
@@ -276,8 +288,18 @@ def compute_team_totals(records: list[dict]) -> tuple[Decimal, Decimal]:
     return total_dues, total_hq
 
 
-def sanitize_filename(team: str) -> str:
-    return re.sub(r"[^A-Za-z0-9]+", "_", team).strip("_")
+FILENAME_ILLEGAL_CHARS = re.compile(r'[\/\\:*?"<>|]')
+
+
+def build_filename(team_name: str, pu_number, month_name: str, year: int) -> str:
+    if pu_number is None or pu_number == "":
+        pu_display = "PU# unknown"
+    else:
+        if isinstance(pu_number, float) and pu_number.is_integer():
+            pu_number = int(pu_number)
+        pu_display = f"PU# {pu_number}"
+    raw = f"({pu_display}) {team_name} _ {month_name}_{year}.xlsx"
+    return FILENAME_ILLEGAL_CHARS.sub("_", raw)
 
 
 def build_report_workbook(template_path, records, total_dues, total_hq):
@@ -311,7 +333,7 @@ def build_report_workbook(template_path, records, total_dues, total_hq):
     return wb
 
 
-def process_team_group(team_name, records, dry_run, template, month_num, year, run_timestamp, output_dir) -> dict:
+def process_team_group(team_name, records, dry_run, template, pu_number, month_name, year, output_dir) -> dict:
     merged_records = merge_duplicate_players(records)
     total_dues, total_hq = compute_team_totals(merged_records)
     result = {
@@ -325,7 +347,7 @@ def process_team_group(team_name, records, dry_run, template, month_num, year, r
     if not dry_run:
         wb = build_report_workbook(template, merged_records, total_dues, total_hq)
         output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"{sanitize_filename(team_name)}_{year}-{month_num:02d}_{run_timestamp}.xlsx"
+        filename = build_filename(team_name, pu_number, month_name, year)
         output_path = output_dir / filename
         wb.save(output_path)
         result["output_path"] = output_path
@@ -381,13 +403,28 @@ def build_arg_parser() -> argparse.ArgumentParser:
              f'with subject "{EMAIL_SUBJECT}". Requires credentials.json in the project root '
              f"(see workflow doc for setup). Has no effect with --dry-run (nothing to attach).",
     )
-    parser.add_argument("--to", default=DEFAULT_RECIPIENT_EMAIL, help="Email recipient (only used with --email).")
+    parser.add_argument(
+        "--to", default=DEFAULT_RECIPIENT_EMAIL,
+        help="Email recipient(s), comma-separated (only used with --email).",
+    )
+    parser.add_argument(
+        "--cc", default=None,
+        help="CC recipient(s), comma-separated (only used with --email).",
+    )
     return parser
+
+
+def _normalize_emails(value) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [e.strip() for e in value.split(",") if e.strip()]
+    return [str(e).strip() for e in value if str(e).strip()]
 
 
 def run_report(
     team, month, year, *,
-    dry_run=False, email=False, to=DEFAULT_RECIPIENT_EMAIL,
+    dry_run=False, email=False, to=DEFAULT_RECIPIENT_EMAIL, cc=None,
     output_dir="reports", template="report_sample.xlsx",
     skip_schema_check=False, month_filter_override=None,
 ) -> dict:
@@ -409,7 +446,8 @@ def run_report(
         validate_expected_fields(schema, EXPECTED_RECORD_FIELDS + FILTER_FIELDS)
         field_types = {name: info["type"] for name, info in schema.items()}
 
-    team_names = get_all_team_names(cfg) if is_batch else [team]
+    team_metadata = get_team_metadata(cfg)
+    team_names = sorted(team_metadata.keys()) if is_batch else [team]
 
     out_dir = (
         Path(output_dir) / f"ALL_{year}-{month_num:02d}_{run_timestamp}"
@@ -428,7 +466,8 @@ def run_report(
                 "total_dues": Decimal("0"), "total_hq": Decimal("0"), "output_path": None,
             }
         else:
-            result = process_team_group(t, records, dry_run, template, month_num, year, run_timestamp, out_dir)
+            pu_number = lookup_pu_number(team_metadata, t)
+            result = process_team_group(t, records, dry_run, template, pu_number, month_name, year, out_dir)
         results.append(result)
         if is_batch:
             print_batch_line(result)
@@ -451,8 +490,13 @@ def run_report(
     email_error = None
     if email and not no_data:
         attachment_paths = [r["output_path"] for r in results if r["output_path"] is not None]
+        to_list = _normalize_emails(to)
+        cc_list = _normalize_emails(cc)
         if not attachment_paths:
             email_error = "no files were written (dry_run or nothing generated)"
+            print(f"Skipping email: {email_error}.", file=sys.stderr)
+        elif not to_list:
+            email_error = "no recipient email address(es) provided"
             print(f"Skipping email: {email_error}.", file=sys.stderr)
         else:
             import gmail_client
@@ -462,9 +506,12 @@ def run_report(
                 if is_batch else f"Attached: {results[0]['team']} dues report for {period}."
             )
             try:
-                gmail_client.send_email_with_attachments(to, EMAIL_SUBJECT, body, attachment_paths)
+                gmail_client.send_email_with_attachments(
+                    to_list, EMAIL_SUBJECT, body, attachment_paths, cc=cc_list or None,
+                )
                 emailed = True
-                print(f"Emailed {len(attachment_paths)} report(s) to {to}.")
+                cc_note = f" (cc: {', '.join(cc_list)})" if cc_list else ""
+                print(f"Emailed {len(attachment_paths)} report(s) to {', '.join(to_list)}{cc_note}.")
             except (gmail_client.GmailAuthError, gmail_client.GmailSendError) as e:
                 email_error = str(e)
                 print(f"Error: {e}", file=sys.stderr)
@@ -487,7 +534,7 @@ def main():
     try:
         result = run_report(
             args.team, args.month, args.year,
-            dry_run=args.dry_run, email=args.email, to=args.to,
+            dry_run=args.dry_run, email=args.email, to=args.to, cc=args.cc,
             output_dir=args.output_dir, template=args.template,
             skip_schema_check=args.skip_schema_check,
             month_filter_override=args.month_filter_override,

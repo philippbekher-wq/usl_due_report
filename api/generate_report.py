@@ -67,6 +67,7 @@ class handler(BaseHTTPRequestHandler):
                 dry_run=bool(body.get("dry_run", False)),
                 email=bool(body.get("email", False)),
                 to=body.get("to", gdr.DEFAULT_RECIPIENT_EMAIL),
+                cc=body.get("additional_mail"),
                 output_dir="/tmp/reports",
                 template=str(Path(__file__).resolve().parent.parent / "report_sample.xlsx"),
                 skip_schema_check=bool(body.get("skip_schema_check", False)),

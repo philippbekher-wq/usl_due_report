@@ -75,7 +75,7 @@ def get_gmail_service():
     return build("gmail", "v1", credentials=creds)
 
 
-def send_email_with_attachments(to: str, subject: str, body: str, attachment_paths: list) -> None:
+def send_email_with_attachments(to: list, subject: str, body: str, attachment_paths: list, cc: list = None) -> None:
     attachment_paths = [Path(p) for p in attachment_paths]
     total_size = sum(p.stat().st_size for p in attachment_paths)
     if total_size > MAX_TOTAL_ATTACHMENT_BYTES:
@@ -87,7 +87,9 @@ def send_email_with_attachments(to: str, subject: str, body: str, attachment_pat
     service = get_gmail_service()
 
     message = MIMEMultipart()
-    message["to"] = to
+    message["to"] = ", ".join(to)
+    if cc:
+        message["cc"] = ", ".join(cc)
     message["subject"] = subject
     message.attach(MIMEText(body))
 

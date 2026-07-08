@@ -42,14 +42,14 @@ This fetches every team name from the Teams table, then runs the exact same sing
 To also email the generated report(s), add `--email`:
 ```
 python tools/generate_dues_report.py --team "Chicago Fire" --month July --year 2026 --email
-python tools/generate_dues_report.py --team all --month July --year 2026 --email
+python tools/generate_dues_report.py --team all --month July --year 2026 --email --to "a@x.com,b@x.com" --cc "manager@x.com"
 ```
-Sends via Gmail (OAuth, see One-Time Setup) to `philipp@lowcoding.dev` by default (override with `--to`), subject `"Report"`, with every generated `.xlsx` attached to a single email — for `--team all` that means one email with all of that run's team reports attached, not one email per team. Has no effect combined with `--dry-run` (nothing was written to attach) — the tool prints a warning and skips emailing rather than failing.
+Sends via Gmail (OAuth, see One-Time Setup) to `philipp@lowcoding.dev` by default (override with `--to`, comma-separated for multiple recipients), optionally CC'd via `--cc` (also comma-separated), subject `"Report"`, with every generated `.xlsx` attached to a single email — for `--team all` that means one email with all of that run's team reports attached, not one email per team. Has no effect combined with `--dry-run` (nothing was written to attach) — the tool prints a warning and skips emailing rather than failing.
 
 ## Expected Output
-Single-team: `reports/<Team>_<YYYY>-<MM>_<timestamp>.xlsx`, e.g. `reports/Chicago_Fire_2026-07_20260708-1420.xlsx`.
+Single-team: `reports/(PU# <number>) <Team> _ <Month>_<Year>.xlsx`, e.g. `reports/(PU# 791101) Brooklyn FC (Championship) _ May_2026.xlsx`. `PU#` is the team's `CWA PU Number` field from the Teams table (`tblxtS2ioQsKvjcZ3`), looked up by team name; if a team has no PU# on file, the filename uses `(PU# unknown)` instead of failing.
 
-Batch (`--team all`): `reports/ALL_<YYYY>-<MM>_<timestamp>/<Team>_<YYYY>-<MM>_<timestamp>.xlsx` — one file per team with matching data, all sharing the same run timestamp in a dedicated subfolder so a batch is identifiable and movable as one unit.
+Batch (`--team all`): `reports/ALL_<YYYY>-<MM>_<timestamp>/(PU# <number>) <Team> _ <Month>_<Year>.xlsx` — one file per team with matching data, in a dedicated per-run subfolder (the subfolder name is timestamped so a batch is identifiable as one unit; the individual filenames inside are not).
 
 Layout matches `report_sample.xlsx` exactly: one row per player (columns A–O, pulled directly from Airtable fields), with `Team Total Dues Paid` and `Team Total Due to National HQ` (columns P/Q) computed by the tool and written only into row 2, as currency-formatted text (e.g. `"$1,366.30"`).
 
@@ -61,7 +61,7 @@ Layout matches `report_sample.xlsx` exactly: one row per player (columns A–O, 
 - **Missing `Dues Paid`**: the record is excluded from the report entirely (see Record Matching Criteria above), not shown as a $0 row.
 - **`Player Invoiced` checked**: the record is excluded from the report entirely.
 - **Missing `Total Due to National HQ` on an otherwise-matching record**: treated as $0 toward the team total, no warning.
-- **Re-running for the same team/month/year**: does not overwrite — each run produces a new timestamped file in `reports/`.
+- **Re-running for the same team/month/year**: overwrites the previous file — filenames are no longer timestamped (matches the required `(PU# ...) Team _ Month_Year.xlsx` deliverable format), so the report is treated as the current, authoritative version for that period rather than a dated snapshot.
 - **Airtable rate limiting (429)**: the tool automatically waits ~30s and retries, up to 3 times.
 - **Missing/renamed Airtable field**: the tool validates the live schema before querying and fails loudly (exit code 3), naming exactly which expected field is missing and listing the base's actual field names — it will not silently produce blank columns.
 - **Duplicate records for the same player**: merged into one row with summed dues/wage fields (see Record Matching Criteria above). The tool prints how many duplicates were merged.
@@ -74,6 +74,8 @@ Layout matches `report_sample.xlsx` exactly: one row per player (columns A–O, 
 - **`--email` with `--dry-run`**: prints a warning and skips emailing rather than erroring — there's nothing generated to attach.
 - **`--email` in batch mode**: all generated reports from that run are attached to a single email (not one email per team). If the total attachment size ever exceeds ~20MB (unlikely at current report sizes — each is a few KB), the tool raises a clear error rather than silently truncating or failing partway through.
 - **Gmail token expiry**: `token.json` auto-refreshes via its stored refresh token on each run; if Google ever revokes it (e.g. consent revoked, or the OAuth app is still in "Testing" mode and the token ages out), delete `token.json` and re-run with `--email` to redo the one-time browser consent.
+- **Missing `CWA PU Number`**: a team present in the Teams table but with a blank PU# still gets a report — the filename just reads `(PU# unknown)` instead of failing that team's report.
+- **Team Name mismatch and PU# lookup**: PU# lookup tries an exact match against the Teams table's `Name` field first, then falls back to a case-insensitive/whitespace-trimmed match. If neither matches, the filename falls back to `(PU# unknown)` rather than erroring.
 
 ## Learnings
 Confirmed against the live base on 2026-07-08:
@@ -84,3 +86,4 @@ Confirmed against the live base on 2026-07-08:
 - `Player Invoiced` is a `checkbox` field. Discovered via a real test run (Brooklyn FC (Championship), May 2026) that roughly half of a team's matching records can have a blank `Dues Paid` — these are players not yet processed for that payroll period and must be excluded from the query (see Record Matching Criteria), not included as blank/zero rows.
 - Duplicate records per player are real, not hypothetical: the same May 2026 Brooklyn FC (Championship) test returned 20 matching records that merged down to 10 unique players. The merged output (post Dues Paid/Player Invoiced filtering and duplicate-summing) matched `report_sample.xlsx`'s original values exactly, confirming the sample itself was built from this same team/period with duplicates already combined.
 - First real `--team all` run (May 2026): 66 teams in the Teams table, 37 produced a report, 29 skipped for no matching payroll data — including all 5 junk/test entries ("Test Team", "Testing Team", "Testing team 2", "Testing team 3", "New Test Team"), confirming no special-case exclusion logic was needed for them. Batch-mode totals for Brooklyn FC (Championship) matched the already-verified single-team run exactly ($1,366.30 / $406.06), confirming per-team queries inside the batch loop behave identically to standalone single-team invocations. Runtime for all 66 sequential per-team queries was ~60 seconds with no rate-limit (429) errors encountered — no additional throttling needed at this scale.
+- The Teams table's `CWA PU Number` field is a plain Airtable `number` type; confirmed live value for Brooklyn FC (Championship) is `791101`, matching the exact filename format requested. Values come back as clean integers via the API (no float/decimal artifacts to handle beyond a defensive `.is_integer()` check).
