@@ -22,6 +22,7 @@ Both conditions are applied server-side in the Airtable query (not just at the t
 ## One-Time Setup
 1. `pip install -r requirements.txt`
 2. Copy `.env.example` to `.env` and fill in `AIRTABLE_API_KEY` with a Personal Access Token that has read access to base `appiVO0LP0Xm603VO`. Never put the token anywhere else.
+3. **Only needed for `--email`**: create a Google Cloud OAuth client (Gmail API enabled, OAuth consent screen configured, OAuth client ID of type "Desktop app"), download it, and save it as `credentials.json` in the project root. The first run with `--email` opens a browser for one-time consent, then caches `token.json` (both gitignored) so future runs don't prompt again.
 
 ## Tool to Use
 `tools/generate_dues_report.py`
@@ -37,6 +38,13 @@ To generate a report for every team at once:
 python tools/generate_dues_report.py --team all --month July --year 2026
 ```
 This fetches every team name from the Teams table, then runs the exact same single-team query/report logic once per team (not a grouped/aggregated query) — so batch-mode numbers for any given team always match what a single-team run for that same team would produce.
+
+To also email the generated report(s), add `--email`:
+```
+python tools/generate_dues_report.py --team "Chicago Fire" --month July --year 2026 --email
+python tools/generate_dues_report.py --team all --month July --year 2026 --email
+```
+Sends via Gmail (OAuth, see One-Time Setup) to `philipp@lowcoding.dev` by default (override with `--to`), subject `"Report"`, with every generated `.xlsx` attached to a single email — for `--team all` that means one email with all of that run's team reports attached, not one email per team. Has no effect combined with `--dry-run` (nothing was written to attach) — the tool prints a warning and skips emailing rather than failing.
 
 ## Expected Output
 Single-team: `reports/<Team>_<YYYY>-<MM>_<timestamp>.xlsx`, e.g. `reports/Chicago_Fire_2026-07_20260708-1420.xlsx`.
@@ -62,6 +70,10 @@ Layout matches `report_sample.xlsx` exactly: one row per player (columns A–O, 
 - **`--team all` and Team Name mismatches**: a team's exact name in the Teams table (`Name` field) must match its `Team Name` value in the payroll table for that team to get a report. A mismatch (typo, casing, extra whitespace) silently produces a skip, not an error.
 - **`--team all` with zero data everywhere**: if every team in the Teams table comes back with zero payroll matches for the given month/year (almost certainly a wrong period), no report is written and the tool exits with code 2 — same signal as the single-team zero-match case.
 - **A real team literally named "All"**: cannot be targeted individually via `--team all` — that value always triggers batch mode instead. Not currently an issue in the live data, but worth knowing if a team is ever renamed.
+- **`--email` without `credentials.json`**: fails clearly (exit code 5) naming the missing file and what to do — report generation itself still succeeds and the local file is still written; only the email step is skipped/failed.
+- **`--email` with `--dry-run`**: prints a warning and skips emailing rather than erroring — there's nothing generated to attach.
+- **`--email` in batch mode**: all generated reports from that run are attached to a single email (not one email per team). If the total attachment size ever exceeds ~20MB (unlikely at current report sizes — each is a few KB), the tool raises a clear error rather than silently truncating or failing partway through.
+- **Gmail token expiry**: `token.json` auto-refreshes via its stored refresh token on each run; if Google ever revokes it (e.g. consent revoked, or the OAuth app is still in "Testing" mode and the token ages out), delete `token.json` and re-run with `--email` to redo the one-time browser consent.
 
 ## Learnings
 Confirmed against the live base on 2026-07-08:

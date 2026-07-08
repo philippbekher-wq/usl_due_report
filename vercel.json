@@ -1,0 +1,8 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "functions": {
+    "api/generate-report.py": {
+      "maxDuration": 120
+    }
+  }
+}

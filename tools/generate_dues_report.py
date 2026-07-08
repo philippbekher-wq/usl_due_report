@@ -19,6 +19,8 @@ import openpyxl
 DEFAULT_BASE_ID = "appiVO0LP0Xm603VO"
 DEFAULT_TABLE_ID = "tblgvGu3ueD1HOm8I"
 DEFAULT_TEAMS_TABLE_ID = "tblxtS2ioQsKvjcZ3"
+DEFAULT_RECIPIENT_EMAIL = "philipp@lowcoding.dev"
+EMAIL_SUBJECT = "Report"
 
 EXPECTED_RECORD_FIELDS = [
     "Unique ID", "Player", "Full Name", "Current Base Compensation", "Dues Paid",
@@ -309,7 +311,7 @@ def build_report_workbook(template_path, records, total_dues, total_hq):
     return wb
 
 
-def process_team_group(team_name, records, args, month_num, year, run_timestamp, output_dir) -> dict:
+def process_team_group(team_name, records, dry_run, template, month_num, year, run_timestamp, output_dir) -> dict:
     merged_records = merge_duplicate_players(records)
     total_dues, total_hq = compute_team_totals(merged_records)
     result = {
@@ -320,8 +322,8 @@ def process_team_group(team_name, records, args, month_num, year, run_timestamp,
         "total_hq": total_hq,
         "output_path": None,
     }
-    if not args.dry_run:
-        wb = build_report_workbook(args.template, merged_records, total_dues, total_hq)
+    if not dry_run:
+        wb = build_report_workbook(template, merged_records, total_dues, total_hq)
         output_dir.mkdir(parents=True, exist_ok=True)
         filename = f"{sanitize_filename(team_name)}_{year}-{month_num:02d}_{run_timestamp}.xlsx"
         output_path = output_dir / filename
@@ -373,109 +375,154 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--month-filter-override", default=None,
         help="Raw filterByFormula clause to use for the month condition instead of the auto-derived one.",
     )
+    parser.add_argument(
+        "--email", action="store_true",
+        help=f'Email the generated report(s) via Gmail to --to (default {DEFAULT_RECIPIENT_EMAIL}) '
+             f'with subject "{EMAIL_SUBJECT}". Requires credentials.json in the project root '
+             f"(see workflow doc for setup). Has no effect with --dry-run (nothing to attach).",
+    )
+    parser.add_argument("--to", default=DEFAULT_RECIPIENT_EMAIL, help="Email recipient (only used with --email).")
     return parser
+
+
+def run_report(
+    team, month, year, *,
+    dry_run=False, email=False, to=DEFAULT_RECIPIENT_EMAIL,
+    output_dir="reports", template="report_sample.xlsx",
+    skip_schema_check=False, month_filter_override=None,
+) -> dict:
+    """Core orchestration shared by the CLI and the HTTP handler. Raises
+    ConfigError/AuthError/ValueError/SchemaMismatchError/RateLimitError/
+    AirtableAPIError/ImportError on hard failures. "No matching records" is
+    NOT raised — it's a normal outcome reflected via the returned dict's
+    "no_data" flag, since callers (CLI exit code, HTTP status) decide how to
+    present it. Prints progress/summary lines exactly as the CLI always has;
+    harmless when called from a server context (becomes log output)."""
+    cfg = load_config()
+    month_num, month_name = normalize_month(month)
+    is_batch = team.strip().lower() == "all"
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+
+    field_types = {}
+    if not skip_schema_check:
+        schema = get_table_schema(cfg)
+        validate_expected_fields(schema, EXPECTED_RECORD_FIELDS + FILTER_FIELDS)
+        field_types = {name: info["type"] for name, info in schema.items()}
+
+    team_names = get_all_team_names(cfg) if is_batch else [team]
+
+    out_dir = (
+        Path(output_dir) / f"ALL_{year}-{month_num:02d}_{run_timestamp}"
+        if is_batch else Path(output_dir)
+    )
+
+    results = []
+    for t in team_names:
+        formula = build_filter_formula(
+            t, month_num, month_name, year, field_types, override=month_filter_override,
+        )
+        records = fetch_all_records(cfg, formula)
+        if not records:
+            result = {
+                "team": t, "matched": 0, "merged": 0,
+                "total_dues": Decimal("0"), "total_hq": Decimal("0"), "output_path": None,
+            }
+        else:
+            result = process_team_group(t, records, dry_run, template, month_num, year, run_timestamp, out_dir)
+        results.append(result)
+        if is_batch:
+            print_batch_line(result)
+
+    no_data = all(r["matched"] == 0 for r in results)
+
+    if not no_data:
+        if not is_batch:
+            print_team_summary(results[0], month_name, year)
+        else:
+            files_written = sum(1 for r in results if r["output_path"] is not None)
+            skipped = sum(1 for r in results if r["matched"] == 0)
+            dry_note = " (dry run)" if dry_run else ""
+            print(
+                f"\nBatch complete{dry_note}: {len(results)} team(s) checked, "
+                f"{files_written} file(s) written, {skipped} skipped (no data)."
+            )
+
+    emailed = False
+    email_error = None
+    if email and not no_data:
+        attachment_paths = [r["output_path"] for r in results if r["output_path"] is not None]
+        if not attachment_paths:
+            email_error = "no files were written (dry_run or nothing generated)"
+            print(f"Skipping email: {email_error}.", file=sys.stderr)
+        else:
+            import gmail_client
+            period = f"{month_name} {year}"
+            body = (
+                f"Attached: {len(attachment_paths)} team dues report(s) for {period}."
+                if is_batch else f"Attached: {results[0]['team']} dues report for {period}."
+            )
+            try:
+                gmail_client.send_email_with_attachments(to, EMAIL_SUBJECT, body, attachment_paths)
+                emailed = True
+                print(f"Emailed {len(attachment_paths)} report(s) to {to}.")
+            except (gmail_client.GmailAuthError, gmail_client.GmailSendError) as e:
+                email_error = str(e)
+                print(f"Error: {e}", file=sys.stderr)
+
+    return {
+        "is_batch": is_batch,
+        "month_num": month_num,
+        "month_name": month_name,
+        "year": year,
+        "no_data": no_data,
+        "results": results,
+        "emailed": emailed,
+        "email_error": email_error,
+    }
 
 
 def main():
     args = build_arg_parser().parse_args()
-    is_batch = args.team.strip().lower() == "all"
 
     try:
-        cfg = load_config()
-    except ConfigError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    try:
-        month_num, month_name = normalize_month(args.month)
-    except ValueError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-
-    try:
-        field_types = {}
-        if not args.skip_schema_check:
-            schema = get_table_schema(cfg)
-            validate_expected_fields(schema, EXPECTED_RECORD_FIELDS + FILTER_FIELDS)
-            field_types = {name: info["type"] for name, info in schema.items()}
-
-        team_names = get_all_team_names(cfg) if is_batch else [args.team]
-    except AuthError as e:
+        result = run_report(
+            args.team, args.month, args.year,
+            dry_run=args.dry_run, email=args.email, to=args.to,
+            output_dir=args.output_dir, template=args.template,
+            skip_schema_check=args.skip_schema_check,
+            month_filter_override=args.month_filter_override,
+        )
+    except (ConfigError, AuthError, ValueError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
     except SchemaMismatchError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(3)
-    except RateLimitError as e:
+    except (RateLimitError, AirtableAPIError) as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(4)
-    except AirtableAPIError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(4)
+    except ImportError as e:
+        print(f"Error: Gmail dependencies not installed ({e}). Run: pip install -r requirements.txt", file=sys.stderr)
+        sys.exit(5)
 
-    output_dir = (
-        Path(args.output_dir) / f"ALL_{args.year}-{month_num:02d}_{run_timestamp}"
-        if is_batch else Path(args.output_dir)
-    )
-
-    results = []
-    try:
-        for team in team_names:
-            formula = build_filter_formula(
-                team, month_num, month_name, args.year, field_types,
-                override=args.month_filter_override,
-            )
-            records = fetch_all_records(cfg, formula)
-            if not records:
-                result = {
-                    "team": team, "matched": 0, "merged": 0,
-                    "total_dues": Decimal("0"), "total_hq": Decimal("0"), "output_path": None,
-                }
-            else:
-                result = process_team_group(team, records, args, month_num, args.year, run_timestamp, output_dir)
-            results.append(result)
-            if is_batch:
-                print_batch_line(result)
-    except AuthError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(1)
-    except RateLimitError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(4)
-    except AirtableAPIError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        sys.exit(4)
-
-    if not is_batch:
-        result = results[0]
-        if result["matched"] == 0:
+    if result["no_data"]:
+        if result["is_batch"]:
             print(
-                f"No records found for team={args.team!r}, month={month_name} ({month_num}), year={args.year}. "
-                f"Verify the team name matches Airtable's 'Team Name' field exactly (case-sensitive) "
-                f"and that data exists for this period.",
+                f"No records found for any team, month={result['month_name']} ({result['month_num']}), "
+                f"year={result['year']}. Verify the period is correct.",
                 file=sys.stderr,
             )
-            sys.exit(2)
-        print_team_summary(result, month_name, args.year)
-        return
-
-    if all(r["matched"] == 0 for r in results):
-        print(
-            f"No records found for any team, month={month_name} ({month_num}), year={args.year}. "
-            f"Verify the period is correct.",
-            file=sys.stderr,
-        )
+        else:
+            print(
+                f"No records found for team={args.team!r}, month={result['month_name']} ({result['month_num']}), "
+                f"year={result['year']}. Verify the team name matches Airtable's 'Team Name' field exactly "
+                f"(case-sensitive) and that data exists for this period.",
+                file=sys.stderr,
+            )
         sys.exit(2)
 
-    files_written = sum(1 for r in results if r["output_path"] is not None)
-    skipped = sum(1 for r in results if r["matched"] == 0)
-    dry_note = " (dry run)" if args.dry_run else ""
-    print(
-        f"\nBatch complete{dry_note}: {len(results)} team(s) checked, "
-        f"{files_written} file(s) written, {skipped} skipped (no data)."
-    )
+    if args.email and result["email_error"]:
+        sys.exit(5)
 
 
 if __name__ == "__main__":
