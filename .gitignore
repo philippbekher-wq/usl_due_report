@@ -4,3 +4,5 @@ token.json
 .tmp/
 __pycache__/
 *.pyc
+.vercel-env-values.txt
+.vercel/
