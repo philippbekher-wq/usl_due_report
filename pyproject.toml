@@ -1,2 +1,15 @@
+[project]
+name = "usl-dues-report"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "requests>=2.31",
+    "openpyxl>=3.1",
+    "python-dotenv>=1.0",
+    "google-auth>=2.23",
+    "google-auth-oauthlib>=1.1",
+    "google-api-python-client>=2.100",
+]
+
 [tool.vercel]
 entrypoint = "api.generate_report:handler"
