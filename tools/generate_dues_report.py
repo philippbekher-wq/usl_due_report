@@ -16,9 +16,6 @@ import requests
 from dotenv import load_dotenv
 import openpyxl
 
-DEFAULT_BASE_ID = "appiVO0LP0Xm603VO"
-DEFAULT_TABLE_ID = "tblgvGu3ueD1HOm8I"
-DEFAULT_TEAMS_TABLE_ID = "tblxtS2ioQsKvjcZ3"
 DEFAULT_RECIPIENT_EMAIL = "philipp@lowcoding.dev"
 EMAIL_SUBJECT = "Report"
 
@@ -89,19 +86,23 @@ class Config:
     teams_table_id: str
 
 
+REQUIRED_ENV_VARS = ["AIRTABLE_API_KEY", "AIRTABLE_BASE_ID", "AIRTABLE_TABLE_ID", "AIRTABLE_TEAMS_TABLE_ID"]
+
+
 def load_config() -> Config:
     load_dotenv()
-    api_key = os.getenv("AIRTABLE_API_KEY")
-    if not api_key:
+    values = {name: os.getenv(name) for name in REQUIRED_ENV_VARS}
+    missing = [name for name, val in values.items() if not val]
+    if missing:
         raise ConfigError(
-            "AIRTABLE_API_KEY is not set. Copy .env.example to .env and fill in "
-            "your Airtable Personal Access Token."
+            f"Missing required env var(s): {', '.join(missing)}. Copy .env.example to .env "
+            f"and fill them in (see workflow doc for where to find each Airtable ID)."
         )
     return Config(
-        api_key=api_key,
-        base_id=os.getenv("AIRTABLE_BASE_ID", DEFAULT_BASE_ID),
-        table_id=os.getenv("AIRTABLE_TABLE_ID", DEFAULT_TABLE_ID),
-        teams_table_id=os.getenv("AIRTABLE_TEAMS_TABLE_ID", DEFAULT_TEAMS_TABLE_ID),
+        api_key=values["AIRTABLE_API_KEY"],
+        base_id=values["AIRTABLE_BASE_ID"],
+        table_id=values["AIRTABLE_TABLE_ID"],
+        teams_table_id=values["AIRTABLE_TEAMS_TABLE_ID"],
     )
 
 
