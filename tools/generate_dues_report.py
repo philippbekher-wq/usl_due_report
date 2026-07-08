@@ -18,6 +18,7 @@ import openpyxl
 
 DEFAULT_BASE_ID = "appiVO0LP0Xm603VO"
 DEFAULT_TABLE_ID = "tblgvGu3ueD1HOm8I"
+DEFAULT_TEAMS_TABLE_ID = "tblxtS2ioQsKvjcZ3"
 
 EXPECTED_RECORD_FIELDS = [
     "Unique ID", "Player", "Full Name", "Current Base Compensation", "Dues Paid",
@@ -83,6 +84,7 @@ class Config:
     api_key: str
     base_id: str
     table_id: str
+    teams_table_id: str
 
 
 def load_config() -> Config:
@@ -97,6 +99,7 @@ def load_config() -> Config:
         api_key=api_key,
         base_id=os.getenv("AIRTABLE_BASE_ID", DEFAULT_BASE_ID),
         table_id=os.getenv("AIRTABLE_TABLE_ID", DEFAULT_TABLE_ID),
+        teams_table_id=os.getenv("AIRTABLE_TEAMS_TABLE_ID", DEFAULT_TEAMS_TABLE_ID),
     )
 
 
@@ -191,13 +194,19 @@ def build_filter_formula(team, month_num, month_name, year, field_types, overrid
     return f"AND({team_clause}, {month_clause}, {year_clause}, {dues_paid_clause}, {not_invoiced_clause})"
 
 
-def fetch_all_records(cfg: Config, formula: str) -> list[dict]:
-    url = f"https://api.airtable.com/v0/{cfg.base_id}/{cfg.table_id}"
+def fetch_all_records(
+    cfg: Config, formula: str = None, table_id: str = None, fields: list[str] = None, max_pages: int = MAX_PAGES,
+) -> list[dict]:
+    url = f"https://api.airtable.com/v0/{cfg.base_id}/{table_id or cfg.table_id}"
     records = []
     offset = None
     page_count = 0
     while True:
-        params = {"filterByFormula": formula, "pageSize": 100}
+        params = {"pageSize": 100}
+        if formula:
+            params["filterByFormula"] = formula
+        if fields:
+            params["fields[]"] = fields
         if offset:
             params["offset"] = offset
         resp = _request_with_retry(cfg, url, params)
@@ -207,9 +216,24 @@ def fetch_all_records(cfg: Config, formula: str) -> list[dict]:
         page_count += 1
         if not offset:
             break
-        if page_count >= MAX_PAGES:
-            raise AirtableAPIError(f"Pagination exceeded {MAX_PAGES} pages; aborting as a safety guard.")
+        if page_count >= max_pages:
+            raise AirtableAPIError(f"Pagination exceeded {max_pages} pages; aborting as a safety guard.")
     return records
+
+
+def get_all_team_names(cfg: Config) -> list[str]:
+    records = fetch_all_records(cfg, table_id=cfg.teams_table_id, fields=["Name"])
+    names = {
+        str(name).strip()
+        for r in records
+        if (name := r.get("fields", {}).get("Name")) and str(name).strip()
+    }
+    if not names:
+        raise AirtableAPIError(
+            f"No team names found in Teams table {cfg.teams_table_id} — check AIRTABLE_TEAMS_TABLE_ID "
+            f"and confirm the table has a 'Name' field."
+        )
+    return sorted(names)
 
 
 DUPLICATE_SUM_FIELDS = ["Dues Paid", "Computed Wage", "Computed PC", "Computed MRF", "Total Due to National HQ"]
@@ -285,11 +309,60 @@ def build_report_workbook(template_path, records, total_dues, total_hq):
     return wb
 
 
+def process_team_group(team_name, records, args, month_num, year, run_timestamp, output_dir) -> dict:
+    merged_records = merge_duplicate_players(records)
+    total_dues, total_hq = compute_team_totals(merged_records)
+    result = {
+        "team": team_name,
+        "matched": len(records),
+        "merged": len(merged_records),
+        "total_dues": total_dues,
+        "total_hq": total_hq,
+        "output_path": None,
+    }
+    if not args.dry_run:
+        wb = build_report_workbook(args.template, merged_records, total_dues, total_hq)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{sanitize_filename(team_name)}_{year}-{month_num:02d}_{run_timestamp}.xlsx"
+        output_path = output_dir / filename
+        wb.save(output_path)
+        result["output_path"] = output_path
+    return result
+
+
+def print_team_summary(result: dict, month_name: str, year: int) -> None:
+    print(f"Matched {result['matched']} record(s) for {result['team']} — {month_name} {year}")
+    duplicate_count = result["matched"] - result["merged"]
+    if duplicate_count:
+        print(f"Merged {duplicate_count} duplicate record(s) by Full Name into {result['merged']} player row(s).")
+    print(f"Team Total Dues Paid: ${result['total_dues']:,.2f}")
+    print(f"Team Total Due to National HQ: ${result['total_hq']:,.2f}")
+    if result["output_path"] is None:
+        print("(dry run — no file written)")
+    else:
+        print(f"Report written to {result['output_path']}")
+
+
+def print_batch_line(result: dict) -> None:
+    if result["matched"] == 0:
+        print(f"{result['team']}: no matching records — skipped")
+        return
+    out = result["output_path"] if result["output_path"] is not None else "(dry run)"
+    print(
+        f"{result['team']}: {result['matched']} matched -> {result['merged']} merged | "
+        f"Dues ${result['total_dues']:,.2f} | HQ ${result['total_hq']:,.2f} | {out}"
+    )
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Generate a monthly USL team dues report from Airtable as an .xlsx file."
     )
-    parser.add_argument("--team", required=True, help="Exact Team Name as stored in Airtable (case-sensitive).")
+    parser.add_argument(
+        "--team", required=True,
+        help='Exact Team Name as stored in Airtable (case-sensitive), or "all" to generate one report '
+             "per team in the Teams table with matching payroll data for the given month/year.",
+    )
     parser.add_argument("--month", required=True, help='Month as a number (1-12) or name (e.g. "July").')
     parser.add_argument("--year", required=True, type=int, help="Four-digit year, e.g. 2026.")
     parser.add_argument("--output-dir", default="reports", help="Directory to write the report into (default: reports/).")
@@ -305,6 +378,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main():
     args = build_arg_parser().parse_args()
+    is_batch = args.team.strip().lower() == "all"
 
     try:
         cfg = load_config()
@@ -318,6 +392,8 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    run_timestamp = datetime.now().strftime("%Y%m%d-%H%M")
+
     try:
         field_types = {}
         if not args.skip_schema_check:
@@ -325,11 +401,7 @@ def main():
             validate_expected_fields(schema, EXPECTED_RECORD_FIELDS + FILTER_FIELDS)
             field_types = {name: info["type"] for name, info in schema.items()}
 
-        formula = build_filter_formula(
-            args.team, month_num, month_name, args.year, field_types,
-            override=args.month_filter_override,
-        )
-        records = fetch_all_records(cfg, formula)
+        team_names = get_all_team_names(cfg) if is_batch else [args.team]
     except AuthError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
@@ -343,38 +415,67 @@ def main():
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(4)
 
-    if not records:
+    output_dir = (
+        Path(args.output_dir) / f"ALL_{args.year}-{month_num:02d}_{run_timestamp}"
+        if is_batch else Path(args.output_dir)
+    )
+
+    results = []
+    try:
+        for team in team_names:
+            formula = build_filter_formula(
+                team, month_num, month_name, args.year, field_types,
+                override=args.month_filter_override,
+            )
+            records = fetch_all_records(cfg, formula)
+            if not records:
+                result = {
+                    "team": team, "matched": 0, "merged": 0,
+                    "total_dues": Decimal("0"), "total_hq": Decimal("0"), "output_path": None,
+                }
+            else:
+                result = process_team_group(team, records, args, month_num, args.year, run_timestamp, output_dir)
+            results.append(result)
+            if is_batch:
+                print_batch_line(result)
+    except AuthError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except RateLimitError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(4)
+    except AirtableAPIError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(4)
+
+    if not is_batch:
+        result = results[0]
+        if result["matched"] == 0:
+            print(
+                f"No records found for team={args.team!r}, month={month_name} ({month_num}), year={args.year}. "
+                f"Verify the team name matches Airtable's 'Team Name' field exactly (case-sensitive) "
+                f"and that data exists for this period.",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        print_team_summary(result, month_name, args.year)
+        return
+
+    if all(r["matched"] == 0 for r in results):
         print(
-            f"No records found for team={args.team!r}, month={month_name} ({month_num}), year={args.year}. "
-            f"Verify the team name matches Airtable's 'Team Name' field exactly (case-sensitive) "
-            f"and that data exists for this period.",
+            f"No records found for any team, month={month_name} ({month_num}), year={args.year}. "
+            f"Verify the period is correct.",
             file=sys.stderr,
         )
         sys.exit(2)
 
-    merged_records = merge_duplicate_players(records)
-    total_dues, total_hq = compute_team_totals(merged_records)
-
-    print(f"Matched {len(records)} record(s) for {args.team} — {month_name} {args.year}")
-    duplicate_count = len(records) - len(merged_records)
-    if duplicate_count:
-        print(f"Merged {duplicate_count} duplicate record(s) by Full Name into {len(merged_records)} player row(s).")
-    print(f"Team Total Dues Paid: ${total_dues:,.2f}")
-    print(f"Team Total Due to National HQ: ${total_hq:,.2f}")
-
-    if args.dry_run:
-        print("(dry run — no file written)")
-        return
-
-    wb = build_report_workbook(args.template, merged_records, total_dues, total_hq)
-
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M")
-    filename = f"{sanitize_filename(args.team)}_{args.year}-{month_num:02d}_{timestamp}.xlsx"
-    output_path = output_dir / filename
-    wb.save(output_path)
-    print(f"Report written to {output_path}")
+    files_written = sum(1 for r in results if r["output_path"] is not None)
+    skipped = sum(1 for r in results if r["matched"] == 0)
+    dry_note = " (dry run)" if args.dry_run else ""
+    print(
+        f"\nBatch complete{dry_note}: {len(results)} team(s) checked, "
+        f"{files_written} file(s) written, {skipped} skipped (no data)."
+    )
 
 
 if __name__ == "__main__":
