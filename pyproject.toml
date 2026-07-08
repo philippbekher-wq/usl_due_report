@@ -1,2 +1,2 @@
 [tool.vercel]
-entrypoint = "api.generate-report:handler"
+entrypoint = "api.generate_report:handler"

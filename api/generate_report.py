@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vercel Python Function: POST /api/generate-report
+"""Vercel Python Function: POST /api/generate_report
 
 Wraps tools/generate_dues_report.run_report() over HTTP. See
 workflows/deploy_and_use_cloud_report_api.md for the request/response

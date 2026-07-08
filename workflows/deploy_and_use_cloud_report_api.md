@@ -4,7 +4,7 @@
 Trigger the same dues report generation as the CLI tool (`tools/generate_dues_report.py`), but over HTTP — for use from external systems (a webhook, a scheduled job, a form) rather than a local terminal. Hosted on Vercel as a Python serverless function.
 
 ## Architecture
-`api/generate-report.py` is a thin HTTP wrapper around `tools/generate_dues_report.run_report()` — the exact same Airtable-querying, xlsx-building, and emailing logic the CLI uses, unchanged. The only real differences from local CLI usage:
+`api/generate_report.py` is a thin HTTP wrapper around `tools/generate_dues_report.run_report()` — the exact same Airtable-querying, xlsx-building, and emailing logic the CLI uses, unchanged. The only real differences from local CLI usage:
 - Generated files are written to `/tmp` (Vercel's one writable, non-persistent directory) instead of `reports/` — there is no persistent storage; email is the only delivery mechanism for the cloud version.
 - Gmail auth uses env vars (`GMAIL_CLIENT_ID`/`GMAIL_CLIENT_SECRET`/`GMAIL_REFRESH_TOKEN`) instead of local `credentials.json`/`token.json` files, since there's no browser available for interactive consent in a serverless function.
 
@@ -37,7 +37,7 @@ vercel --prod
 
 ## Request / Response Contract
 
-`POST /api/generate-report`
+`POST /api/generate_report`
 
 Headers: `X-API-Key: <API_SHARED_SECRET value>`, `Content-Type: application/json`
 
@@ -59,7 +59,7 @@ Body:
 
 Example:
 ```
-curl -X POST https://<your-deployment>.vercel.app/api/generate-report \
+curl -X POST https://<your-deployment>.vercel.app/api/generate_report \
   -H "X-API-Key: <secret>" \
   -H "Content-Type: application/json" \
   -d '{"team": "Brooklyn FC (Championship)", "month": "May", "year": 2026, "email": true}'
