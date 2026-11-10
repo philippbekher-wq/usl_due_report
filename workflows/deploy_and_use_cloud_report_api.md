@@ -27,6 +27,7 @@ In the Vercel dashboard (Project → Settings → Environment Variables) or via 
 - `API_SHARED_SECRET` — a long random string you generate; callers must send this as the `X-API-Key` header
 - `GMAIL_CLIENT_ID`, `GMAIL_CLIENT_SECRET` — from local `credentials.json`
 - `GMAIL_REFRESH_TOKEN` — from local `token.json` (obtained during the one-time local `--email` OAuth consent)
+- `SENTRY_DSN` — from the Sentry project (Settings → Client Keys). Without it nothing is reported; see **Error Notifications** below.
 
 Never paste these values into chat or a shared doc — set them directly via the Vercel dashboard or CLI.
 
@@ -86,9 +87,33 @@ Status codes: `400` bad/missing input, `401` missing or wrong `X-API-Key`, `500`
 ## Edge Cases & Known Behaviors
 All CLI edge cases still apply (duplicate-player merging, Dues Paid/Player Invoiced filtering, batch skip behavior for teams with no data that period) since the underlying logic is identical — see `workflows/generate_team_dues_report.md`.
 - **No persistent storage**: files exist only in `/tmp` for the duration of one request/response. If `email` is false, the generated report is produced and then effectively discarded — there's no way to retrieve it afterward. Always pass `"email": true` for the cloud version unless you're just testing with `"dry_run": true`.
-- **A failed email doesn't fail the request**: if report generation succeeds but the Gmail send fails, the response is still `200` with `"emailed": false` and `"email_error"` describing what went wrong — the caller should check that field explicitly rather than assuming `200` means the email was sent.
+- **A failed email doesn't fail the request**: if report generation succeeds but the Gmail send fails, the response is still `200` with `"emailed": false` and `"email_error"` describing what went wrong — the caller should check that field explicitly rather than assuming `200` means the email was sent. (It is reported to Sentry either way.)
 - **`GMAIL_REFRESH_TOKEN` expiry**: only relevant if the OAuth consent screen setup step (Internal) wasn't done — see the note above.
 - **`--team all` runtime**: observed ~60s locally for 66 teams; `vercel.json` sets `maxDuration: 120` for headroom, well under Vercel Hobby's 300s ceiling.
+
+## Error Notifications (Sentry)
+Callers only see the HTTP response, so both endpoints report problems to Sentry (`tools/monitoring.py`), and Sentry emails the operator. Sentry is used instead of Gmail-based alerts on purpose: the likeliest failure here is the Gmail token breaking, and an alert sent through Gmail would fail in exactly that case.
+
+What gets reported (each with the request body and response attached; the `X-API-Key` header never is):
+
+| Endpoint | Reported when |
+|---|---|
+| `POST /api/generate_report` | any `4xx`/`5xx` returned to the caller; any unexpected exception (full traceback, caller gets a JSON `500`); `200` with `"status": "no_data"` (usually a misspelled team name, and the caller got no report); `200` with `email_error` (except dry runs); still running 15s before `maxDuration` (Vercel's kill can't be caught, so a watchdog reports just before it) |
+| `GET /api/cron_brooklyn_report` | any run that doesn't email the report (error, exception, no data, email failed); `CRON_SECRET` not set (every scheduled run would get `401`). A wrong `Authorization` header with `CRON_SECRET` set is a stray request and is *not* reported. |
+
+**Sentry Crons**: every cron run checks in to the monitor `cron-brooklyn-report`, which the SDK auto-creates from `MONITOR_CONFIG` in `api/cron_brooklyn_report.py` on the first run (the free plan includes one cron monitor). Sentry alerts when a run fails, exceeds `max_runtime`, or **never happens** (deploy broken, crash on import, cron removed). `checkin_margin` is 90 min because Vercel Hobby only guarantees a cron fires somewhere within its scheduled hour.
+
+**Keep in sync with `vercel.json`**: `MAX_DURATION_SECONDS` in `api/generate_report.py` (its `maxDuration`) and the `schedule` in `MONITOR_CONFIG` (the `crons` entry).
+
+**Who gets emailed**: Sentry emails per the project's alert rules (Alerts → issue alert, "a new issue is created" → email). Identical failures group into one issue, so a repeat doesn't re-email unless the rule is set to alert on every event. To deliver to an address other than the Sentry login: User Settings → Emails (add + verify), then Notifications → Email Routing for the project.
+
+**Smoke test after deploying** (safe: no report is generated, nothing is emailed to a client):
+```
+curl -X POST https://<your-deployment>.vercel.app/api/generate_report -d 'not json'
+```
+Expect `400`, and within a minute a Sentry issue `POST /api/generate_report: Request body must be valid JSON.` plus the alert email.
+
+**Not covered**: a crash *before* our code runs (e.g. a missing dependency at import) returns Vercel's own `500` with no report for the POST endpoint. The cron endpoint is still covered there, via the missed check-in.
 
 ## Learnings
 _(empty — update after the first real deployed request, especially anything about cold-start latency, the actual `/tmp` write behavior in production, or whether the Internal consent screen change fully eliminated token expiry.)_

@@ -4,3 +4,4 @@ python-dotenv>=1.0
 google-auth>=2.23
 google-auth-oauthlib>=1.1
 google-api-python-client>=2.100
+sentry-sdk>=2.0
