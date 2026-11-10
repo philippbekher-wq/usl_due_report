@@ -38,6 +38,7 @@ TEAM = "Brooklyn FC (Championship)"
 MONTH = "May"
 YEAR = 2026
 RECIPIENT = "philipp@lowcoding.dev"
+REPORT_INPUT = {"team": TEAM, "month": MONTH, "year": YEAR, "to": RECIPIENT}  # shown on Sentry issues
 
 MONITOR_SLUG = "cron-brooklyn-report"
 MONITOR_CONFIG = {
@@ -85,6 +86,8 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_GET(self):
+        http_request = monitoring.describe_request(self)
+        contexts = {"report_input": REPORT_INPUT}
         expected_secret = os.environ.get("CRON_SECRET")
         provided_auth = self.headers.get("Authorization")
         if not expected_secret or provided_auth != f"Bearer {expected_secret}":
@@ -93,7 +96,8 @@ class handler(BaseHTTPRequestHandler):
                 # set, so every scheduled run is being rejected. (With it set, a
                 # mismatch is just a stray request and not worth an alert.)
                 monitoring.report_problem(
-                    ENDPOINT, "CRON_SECRET is not set; scheduled runs are rejected with 401", status=401,
+                    ENDPOINT, "CRON_SECRET is not set; scheduled runs are rejected with 401",
+                    status=401, http_request=http_request, contexts=contexts,
                 )
                 capture_checkin(MONITOR_SLUG, status=MonitorStatus.ERROR, monitor_config=MONITOR_CONFIG)
                 monitoring.flush()
@@ -108,11 +112,14 @@ class handler(BaseHTTPRequestHandler):
             status, body = self._run()
             problem = _problem(status, body)
             if problem:
-                monitoring.report_problem(ENDPOINT, problem, status=status, response=_json_safe(body))
+                monitoring.report_problem(
+                    ENDPOINT, problem, status=status, http_request=http_request,
+                    contexts={**contexts, "response_to_caller": _json_safe(body)},
+                )
         except Exception as e:
             status, body = 500, {"error": f"Unexpected server error ({type(e).__name__})."}
             problem = str(e)
-            monitoring.report_exception(ENDPOINT, e, status=status)
+            monitoring.report_exception(ENDPOINT, e, status=status, http_request=http_request, contexts=contexts)
         capture_checkin(
             MONITOR_SLUG, check_in_id=check_in_id,
             status=MonitorStatus.ERROR if problem else MonitorStatus.OK,

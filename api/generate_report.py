@@ -61,24 +61,26 @@ class handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self):
-        request = {}  # parsed body, filled in by _process; also read by the watchdog
-        with monitoring.timeout_watchdog(ENDPOINT, MAX_DURATION_SECONDS, request):
+        content_length = int(self.headers.get("Content-Length", 0))
+        raw_body = self.rfile.read(content_length) if content_length else b""
+        http_request = monitoring.describe_request(self, raw_body)  # what the caller sent, for Sentry
+        with monitoring.timeout_watchdog(ENDPOINT, MAX_DURATION_SECONDS, http_request):
+            request = {}  # parsed body, filled in by _process
             try:
-                status, body = self._process(request)
+                status, body = self._process(raw_body or b"{}", request)
                 problem = _problem(status, body, request)
                 if problem:
                     monitoring.report_problem(
-                        ENDPOINT, problem, status=status, request=request, response=_json_safe(body),
+                        ENDPOINT, problem, status=status, http_request=http_request,
+                        contexts={"response_to_caller": _json_safe(body)},
                     )
             except Exception as e:
                 status, body = 500, {"error": f"Unexpected server error ({type(e).__name__})."}
-                monitoring.report_exception(ENDPOINT, e, status=status, request=request)
+                monitoring.report_exception(ENDPOINT, e, status=status, http_request=http_request)
             monitoring.flush()
         self._send_json(status, body)
 
-    def _process(self, request: dict) -> tuple[int, dict]:
-        content_length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(content_length) if content_length else b"{}"
+    def _process(self, raw_body: bytes, request: dict) -> tuple[int, dict]:
         try:
             body = json.loads(raw_body)
         except json.JSONDecodeError:

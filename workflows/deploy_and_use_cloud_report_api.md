@@ -94,7 +94,13 @@ All CLI edge cases still apply (duplicate-player merging, Dues Paid/Player Invoi
 ## Error Notifications (Sentry)
 Callers only see the HTTP response, so both endpoints report problems to Sentry (`tools/monitoring.py`), and Sentry emails the operator. Sentry is used instead of Gmail-based alerts on purpose: the likeliest failure here is the Gmail token breaking, and an alert sent through Gmail would fail in exactly that case.
 
-What gets reported (each with the request body and response attached; the `X-API-Key` header never is):
+**Finding the cause on a Sentry issue** (open the issue → latest event):
+- **Title**: the error the caller got (e.g. `POST /api/generate_report: Could not parse month 'Mayy'`). Tags `endpoint` and `http_status` are at the top.
+- **Request** section: exactly what the caller sent: method, URL, `User-Agent`/`Content-Type`, and the **Body** (parsed JSON, or the raw text if it wasn't valid JSON). `X-API-Key`/`Authorization` show as `[Filtered]` when sent and are absent when missing, which is how a `401` "wrong key" differs from "no key".
+- **Contexts** section: `response_to_caller` (the JSON the caller received) and, for the cron, `report_input` (its hardcoded team/month/year/recipient).
+- **Stack trace** (unexpected exceptions only): file/line/code per frame. Local variables are deliberately *not* captured (`include_local_variables=False`), because they'd carry `API_SHARED_SECRET`, `CRON_SECRET`, and the Airtable key.
+
+What gets reported:
 
 | Endpoint | Reported when |
 |---|---|
